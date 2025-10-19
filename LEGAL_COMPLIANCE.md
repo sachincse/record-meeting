@@ -17,5 +17,5 @@ Recording laws vary by jurisdiction. Always obtain consent before recording audi
 
 ## Default Behavior
 
-RecordFlow defaults to mic-only mode to minimize legal exposure.
+RecordMyMeeting defaults to mic-only mode to minimize legal exposure.
 
