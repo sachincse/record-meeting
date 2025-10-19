@@ -1,10 +1,10 @@
 from setuptools import setup, find_packages
 
-long_description = "RecordFlow: Effortlessly capture audio and screen with intelligent device detection"
+long_description = "RecordMyMeeting: Effortlessly capture audio and screen with intelligent device detection"
 
 setup(
-    name="recordflow",
-    version="0.1.2",
+    name="recordmymeeting",
+    version="0.2.0",
     author="Your Name",
     author_email="your_email@example.com",
     description="Effortlessly capture audio and screen with intelligent device detection",
@@ -20,8 +20,8 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "recordflow=recordflow.cli:main",
-            "recordflow-gui=recordflow.gui_app:launch_gui",
+            "recordmymeeting=recordmymeeting.cli:main",
+            "recordmymeeting-gui=recordmymeeting.gui_app:launch_gui",
         ],
     },
 )
