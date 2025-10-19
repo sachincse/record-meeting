@@ -7,24 +7,25 @@ import logging
 import atexit
 import os
 import sys
+import platform
 from typing import Optional
 
 # Assuming these exist in your project structure
-from .core import RecordFlow
-from .device_manager import list_audio_devices
+from recordmymeeting.core import RecordMyMeeting
+from recordmymeeting.device_manager import list_audio_devices
 
 logger = logging.getLogger(__name__)
 
-class RecordFlowGUI:
-    """GUI application for RecordFlow with robust window handling."""
+class RecordMyMeetingGUI:
+    """GUI application for RecordMyMeeting with robust window handling and device testing."""
 
     def __init__(self, root):
         """Initialize the GUI."""
         self.root = root
-        self.root.title("RecordFlow - Audio & Screen Recorder")
+        self.root.title("RecordMyMeeting v0.2.0")
         
         # Thread-safe variables
-        self._recorder = None # The RecordFlow instance
+        self._recorder = None # The RecordMyMeeting instance
         self._recorder_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._active_recording = False
@@ -34,9 +35,9 @@ class RecordFlowGUI:
         self.channels_var = tk.StringVar(value="1") # Default to 1
 
         # Configure window
-        self.root.geometry("850x750")
+        self.root.geometry("850x900")
         self.root.resizable(True, True)
-        self.root.minsize(800, 600)
+        self.root.minsize(800, 700)
 
         #Handle window close event
         root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -54,7 +55,7 @@ class RecordFlowGUI:
         self._make_scrollable_gui()
         self._refresh_audio_devices()
         
-        logger.info("RecordFlow GUI initialized")
+        logger.info("RecordMyMeeting GUI initialized")
 
     def _make_scrollable_gui(self):
         """Create a scrollable GUI layout."""
@@ -177,9 +178,29 @@ class RecordFlowGUI:
 
         ttk.Button(device_frame, text="🔄 Refresh Devices", command=self._refresh_audio_devices).grid(row=2, column=0, columnspan=2, pady=(8,0))
 
+        # NEW: Device Testing Section
+        test_frame = ttk.LabelFrame(frame, text="Test Devices", padding="10")
+        test_frame.grid(row=4, column=0, sticky='ew', **pad)
+        test_frame.columnconfigure(0, weight=1)
+
+        test_button_frame = ttk.Frame(test_frame)
+        test_button_frame.grid(row=0, column=0, sticky='ew', padx=8, pady=4)
+
+        self.test_mic_btn = ttk.Button(test_button_frame, text="🎤 Test Microphone", command=self._test_microphone)
+        self.test_mic_btn.pack(side=tk.LEFT, padx=5)
+
+        self.test_speaker_btn = ttk.Button(test_button_frame, text="🔊 Test Speaker", command=self._test_speaker)
+        self.test_speaker_btn.pack(side=tk.LEFT, padx=5)
+
+        self.test_screen_btn = ttk.Button(test_button_frame, text="🖥️ Test Screen", command=self._test_screen)
+        self.test_screen_btn.pack(side=tk.LEFT, padx=5)
+
+        self.test_status_label = ttk.Label(test_frame, text="Click a button to test a device", font=("Arial", 10))
+        self.test_status_label.grid(row=1, column=0, sticky='w', padx=8, pady=8)
+
         # Quality Settings
         quality_frame = ttk.LabelFrame(frame, text="Quality Settings (Optional)", padding="10")
-        quality_frame.grid(row=4, column=0, sticky='ew', **pad)
+        quality_frame.grid(row=5, column=0, sticky='ew', **pad)
 
         qual_inner = ttk.Frame(quality_frame)
         qual_inner.pack(fill='x', padx=8, pady=4)
@@ -197,7 +218,7 @@ class RecordFlowGUI:
 
         # Scheduling
         schedule_frame = ttk.LabelFrame(frame, text="Schedule (Optional)", padding="10")
-        schedule_frame.grid(row=5, column=0, sticky='ew', **pad)
+        schedule_frame.grid(row=6, column=0, sticky='ew', **pad)
 
         self.schedule_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(schedule_frame, text="Enable recording schedule", variable=self.schedule_var,
@@ -224,14 +245,14 @@ class RecordFlowGUI:
 
         # Status Display
         status_frame = ttk.LabelFrame(frame, text="Status", padding="10")
-        status_frame.grid(row=6, column=0, sticky='ew', **pad)
+        status_frame.grid(row=7, column=0, sticky='ew', **pad)
 
         self.status_label = ttk.Label(status_frame, text="Ready to record", font=("Arial", 11), foreground="green")
         self.status_label.pack(anchor='w', pady=8, padx=4)
 
         # Control Buttons
         button_frame = ttk.Frame(frame)
-        button_frame.grid(row=7, column=0, pady=(20, 10))
+        button_frame.grid(row=8, column=0, pady=(20, 10))
 
         if icon_available:
             self.start_btn = ttk.Button(button_frame, text="Start Recording", image=self.play_icon, compound=tk.LEFT, command=self._handle_start, width=20)
@@ -250,7 +271,7 @@ class RecordFlowGUI:
         footer = ttk.Label(frame, text="Tip: Ensure you have the necessary permissions before recording audio or screen.",
                             font=("Arial", 9), foreground="gray")
         
-        footer.grid(row=8, column=0, sticky='ew', pady=(20,10))
+        footer.grid(row=9, column=0, sticky='ew', pady=(20,10))
 
 
     def _browse_output(self):
@@ -312,6 +333,196 @@ class RecordFlowGUI:
         except:
             return None
 
+
+
+    # NEW: Device Testing Methods
+    def _test_microphone(self):
+        """Test microphone device."""
+        import pyaudio
+        import numpy as np
+
+        mic_index = self._get_device_index(self.mic_combo.get())
+        if mic_index is None:
+            self.test_status_label.config(
+                text="❌ Please select a microphone device first",
+                foreground="red")
+            return
+
+        self.test_mic_btn.config(state="disabled")
+        self.test_status_label.config(
+            text="🎤 Testing microphone... Recording 2 seconds of audio...",
+            foreground="blue")
+        self.root.update()
+
+        def test_thread():
+            try:
+                p = pyaudio.PyAudio()
+                device_info = p.get_device_info_by_index(mic_index)
+                max_channels = int(device_info.get('maxInputChannels', 1))
+                actual_channels = min(2, max_channels)
+
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=actual_channels,
+                    rate=44100,
+                    input=True,
+                    input_device_index=mic_index,
+                    frames_per_buffer=1024
+                )
+
+                frames = []
+                for i in range(0, int(44100 / 1024 * 2)):
+                    data = stream.read(1024, exception_on_overflow=False)
+                    frames.append(data)
+
+                stream.stop_stream()
+                stream.close()
+
+                audio_data = b''.join(frames)
+                if len(audio_data) > 0:
+                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                    max_vol = np.max(np.abs(audio_array))
+
+                    if max_vol > 50:
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text=f"✅ Microphone is working! Max volume: {max_vol}",
+                            foreground="green"))
+                    else:
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text=f"⚠️ Microphone is active but very quiet. Max volume: {max_vol}. Try speaking louder or check microphone settings.",
+                            foreground="orange"))
+                else:
+                    self.root.after(0, lambda: self.test_status_label.config(
+                        text="❌ No audio data received from microphone",
+                        foreground="red"))
+
+                p.terminate()
+
+            except Exception as e:
+                self.root.after(0, lambda: self.test_status_label.config(
+                    text=f"❌ Microphone test failed: {str(e)}",
+                    foreground="red"))
+            finally:
+                self.root.after(0, lambda: self.test_mic_btn.config(state="normal"))
+
+        threading.Thread(target=test_thread, daemon=True).start()
+
+    def _test_speaker(self):
+        """Test speaker/system audio recording device."""
+        import pyaudio
+        import numpy as np
+
+        spk_index = self._get_device_index(self.spk_combo.get())
+        if spk_index is None:
+            self.test_status_label.config(
+                text="❌ Please select a speaker device first",
+                foreground="red")
+            return
+
+        self.test_speaker_btn.config(state="disabled")
+        self.test_status_label.config(
+            text="🔊 Testing speaker... Recording 2 seconds of system audio...",
+            foreground="blue")
+        self.root.update()
+
+        def test_thread():
+            try:
+                p = pyaudio.PyAudio()
+                device_info = p.get_device_info_by_index(spk_index)
+                max_channels = int(device_info.get('maxInputChannels', 1))
+                actual_channels = min(2, max_channels)
+
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=actual_channels,
+                    rate=44100,
+                    input=True,
+                    input_device_index=spk_index,
+                    frames_per_buffer=1024
+                )
+
+                frames = []
+                for i in range(0, int(44100 / 1024 * 2)):
+                    data = stream.read(1024, exception_on_overflow=False)
+                    frames.append(data)
+
+                stream.stop_stream()
+                stream.close()
+
+                audio_data = b''.join(frames)
+                if len(audio_data) > 0:
+                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                    max_vol = np.max(np.abs(audio_array))
+
+                    if max_vol > 50:
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text=f"✅ Speaker recording is working! Max volume: {max_vol}",
+                            foreground="green"))
+                    else:
+                        macos_note = ""
+                        if platform.system() == 'Darwin':
+                            macos_note = " On macOS, you need BlackHole or similar virtual audio device. See MACOS_SPEAKER_RECORDING.md."
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text=f"⚠️ Speaker device active but very quiet. Max volume: {max_vol}. Play some audio and try again.{macos_note}",
+                            foreground="orange"))
+                else:
+                    self.root.after(0, lambda: self.test_status_label.config(
+                        text="❌ No audio data received from speaker device",
+                        foreground="red"))
+
+                p.terminate()
+
+            except Exception as e:
+                error_msg = str(e)
+                macos_help = ""
+                if platform.system() == 'Darwin':
+                    macos_help = " On macOS, you need BlackHole or similar virtual audio device. See MACOS_SPEAKER_RECORDING.md for setup."
+                self.root.after(0, lambda: self.test_status_label.config(
+                    text=f"❌ Speaker test failed: {error_msg}.{macos_help}",
+                    foreground="red"))
+            finally:
+                self.root.after(0, lambda: self.test_speaker_btn.config(state="normal"))
+
+        threading.Thread(target=test_thread, daemon=True).start()
+
+    def _test_screen(self):
+        """Test screen recording capability."""
+        import mss
+
+        self.test_screen_btn.config(state="disabled")
+        self.test_status_label.config(
+            text="🖥️ Testing screen recording... Capturing one frame...",
+            foreground="blue")
+        self.root.update()
+
+        def test_thread():
+            try:
+                with mss.mss() as sct:
+                    monitor = sct.monitors[0]
+                    img = sct.grab(monitor)
+                    
+                    if img:
+                        resolution = f"{monitor['width']}x{monitor['height']}"
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text=f"✅ Screen recording is working! Resolution: {resolution}",
+                            foreground="green"))
+                    else:
+                        self.root.after(0, lambda: self.test_status_label.config(
+                            text="❌ Failed to capture screen",
+                            foreground="red"))
+
+            except Exception as e:
+                error_msg = str(e)
+                permission_note = ""
+                if platform.system() == 'Darwin':
+                    permission_note = " On macOS, you need to grant screen recording permissions. See SCREEN_RECORDING_PERMISSIONS_MACOS.md."
+                self.root.after(0, lambda: self.test_status_label.config(
+                    text=f"❌ Screen test failed: {error_msg}.{permission_note}",
+                    foreground="red"))
+            finally:
+                self.root.after(0, lambda: self.test_screen_btn.config(state="normal"))
+
+        threading.Thread(target=test_thread, daemon=True).start()
 
     def _handle_start(self):
         """Handle start recording button click."""
@@ -420,7 +631,7 @@ class RecordFlowGUI:
         """Start the actual recording."""
         try:
             with self._recorder_lock:
-                self._recorder = RecordFlow(
+                self._recorder = RecordMyMeeting(
                     record_mic=self.record_mic_var.get(),
                     record_speaker=self.record_speaker_var.get(),
                     record_screen=self.record_screen_var.get(),
@@ -660,10 +871,12 @@ class RecordFlowGUI:
                 with self._recorder_lock:
                     if self._recorder and self._active_recording:
                         try:
+                            # CRITICAL FIX: Capture session_folder BEFORE stopping
+                            saved_folder = self._recorder.session_folder
                             self._recorder.stop(save_output=True)  # Explicitly save output
-                            logger.info(f"Recording stopped and saved to: {self._recorder.session_folder}")
+                            logger.info(f"Recording stopped and saved to: {saved_folder}")
                             if self.root.winfo_exists():  # Check if root still exists
-                                messagebox.showinfo("Recording Complete", f"Recording saved to: {self._recorder.session_folder}")
+                                messagebox.showinfo("Recording Complete", f"Recording saved to: {saved_folder}")
                         except Exception as e:
                             logger.error(f"Error saving recording during close: {e}", exc_info=True)
                             if self.root.winfo_exists():
@@ -688,13 +901,20 @@ class RecordFlowGUI:
             
             if self._recording_thread and self._recording_thread.is_alive():
                 self._recording_thread.join(timeout=1)
+            
+            # Only proceed with close if user didn't cancel
+            if response is not None:
+                # Perform final cleanup and destroy the window
+                self._cleanup_on_exit()
+                self.root.destroy()
+            else:
+                # User cancelled - reset flag and keep window open
+                self._is_closing = False
+                return
         else:
-            self._is_closing = False # Reset flag if user cancelled
-            return
-
-        # Perform final cleanup and destroy the window
-        self._cleanup_on_exit()
-        self.root.destroy()
+            # No recording active - just close normally
+            self._cleanup_on_exit()
+            self.root.destroy()
 
 
     def _cleanup_on_exit(self):
@@ -719,40 +939,17 @@ class RecordFlowGUI:
             logger.info("Cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-        """Cleanup resources on exit."""
-        logger.info("Performing final cleanup before exit.")
-        # Ensure stop flag is set to terminate any waiting threads
-        self._stop_flag.set()
-
-        # Join the recording thread if it's still running, with a short timeout
-        if self._recording_thread and self._recording_thread.is_alive():
-            logger.info("Waiting for recording thread to finish during cleanup.")
-            self._recording_thread.join(timeout=2) # Give it a little time
-
-        with self._recorder_lock:
-            if self._recorder and self._active_recording:
-                try:
-                    logger.info("Stopping active recorder during cleanup.")
-                    self._recorder.stop() # Attempt to stop gracefully
-                    logger.info("Recorder stopped during cleanup.")
-                except Exception as e:
-                    logger.error(f"Error stopping recorder during cleanup: {e}")
-                finally:
-                    self._recorder = None
-                    self._active_recording = False
-        
-        logger.info("Cleanup complete.")
 
 
 def launch_gui():
-    """Launch the RecordFlow GUI application."""
+    """Launch the RecordMyMeeting GUI application."""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
     root = tk.Tk()
-    app = RecordFlowGUI(root)
+    app = RecordMyMeetingGUI(root)
     try:
         root.mainloop()
     except Exception as e:

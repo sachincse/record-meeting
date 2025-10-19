@@ -1,4 +1,4 @@
-"""Utility helpers for RecordFlow"""
+"""Utility helpers for RecordMyMeeting"""
 import os
 from datetime import datetime
 

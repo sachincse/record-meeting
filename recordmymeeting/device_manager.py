@@ -68,8 +68,124 @@ def get_device_priority(device: Dict) -> int:
     return priority
 
 
-def auto_detect_devices():
-    """Auto-detect recording devices with advanced detection and testing."""
+def list_audio_devices() -> Dict[str, List[Dict]]:
+    """
+    List all available audio devices.
+
+    Returns:
+        Dict: Dictionary with 'microphones' and 'speakers' lists containing device info
+
+    Example:
+        >>> print(devices['microphones'])
+        [{'index': 0, 'name': 'Built-in Microphone', 'channels': 2, ...}]
+    """
+    p = pyaudio.PyAudio()
+    microphones = []
+    speakers = []
+
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        device_data = {
+            'index': i,
+            'name': info['name'],
+            'channels': info['maxInputChannels'] if info['maxInputChannels'] > 0 else info['maxOutputChannels'],
+            'default_sample_rate': info['defaultSampleRate'],
+            'host_api': p.get_host_api_info_by_index(info['hostApi'])['name']
+        }
+
+        # Devices with input channels can be used for recording
+        if info['maxInputChannels'] > 0:
+            microphones.append(device_data)
+
+        # Devices with output channels can be used as speakers
+        if info['maxOutputChannels'] > 0:
+            speakers.append(device_data)
+
+    p.terminate()
+
+    return {
+        'microphones': microphones,
+        'speakers': speakers,
+        'all_devices': microphones + speakers
+    }
+
+
+def get_default_devices() -> Dict[str, Optional[int]]:
+    """
+    Get system default audio devices.
+
+    Returns:
+        Dict: Dictionary with 'mic' and 'speaker' default device indices
+    """
+    p = pyaudio.PyAudio()
+    mic_index = None
+    speaker_index = None
+
+    try:
+        default_input = p.get_default_input_device_info()
+        mic_index = default_input['index']
+    except Exception as e:
+        logger.warning(f"Could not get default input device: {e}")
+
+    try:
+        default_output = p.get_default_output_device_info()
+        speaker_index = default_output['index']
+    except Exception as e:
+        logger.warning(f"Could not get default output device: {e}")
+    finally:
+        p.terminate()
+
+    return {
+        'mic': mic_index,
+        'speaker': speaker_index
+    }
+
+
+def test_device(device_index: int, duration: float = 0.5) -> bool:
+    """
+    Test if a device is working by attempting a short recording/playback.
+
+    Args:
+        device_index: Index of the device to test
+        duration: Test duration in seconds (default: 0.5)
+
+    Returns:
+        bool: True if device is working, False otherwise
+    """
+    p = pyaudio.PyAudio()
+    try:
+        # Try to open a stream with the device
+        stream = p.open(format=pyaudio.paInt16,
+                        channels=1,
+                        rate=44100,
+                        input_device_index=device_index,
+                        input=True,
+                        frames_per_buffer=1024)
+
+        # Try to read some data
+        for _ in range(0, int(44100 / 1024 * duration)):
+            data = stream.read(1024, exception_on_overflow=False)
+            if not data:
+                return False
+
+        stream.stop_stream()
+        stream.close()
+        return True
+    except Exception as e:
+        logger.debug(f"Device {device_index} test failed: {e}")
+        return False
+    finally:
+        p.terminate()
+
+
+def auto_detect_devices() -> Dict[str, Optional[Dict]]:
+    """
+    Automatically detect working audio devices with smart prioritization.
+    Handles headphones, built-in devices, and external audio interfaces.
+
+    Returns:
+        Dict: Dictionary with 'mic' and 'speaker' device information
+    """
     p = pyaudio.PyAudio()
     devices = {}
     
@@ -102,7 +218,7 @@ def auto_detect_devices():
                 except Exception as e:
                     logger.warning(f"Default microphone test failed: {e}")
             
-            if default_output >= 0:
+            if default_output and default_output >= 0:
                 output_info = p.get_device_info_by_index(default_output)
                 # Test output device for input capability (loopback)
                 try:
@@ -135,7 +251,6 @@ def auto_detect_devices():
             
             # Find best microphone if not already set
             if not devices.get('mic') and all_devices.get('microphones'):
-                # Sort by priority
                 candidates = sorted(all_devices['microphones'], 
                                  key=get_device_priority, 
                                  reverse=True)
@@ -226,205 +341,6 @@ def auto_detect_devices():
     return devices
 
 
-def list_audio_devices() -> Dict[str, List[Dict]]:
-    """
-    List all available audio devices.
-
-    Returns:
-        Dict: Dictionary with 'microphones' and 'speakers' lists containing device info
-
-    Example:
-        >>> print(devices['microphones'])
-        [{'index': 0, 'name': 'Built-in Microphone', 'channels': 2, ...}]
-    """
-    p = pyaudio.PyAudio()
-    microphones = []
-    speakers = []
-
-    for i in range(p.get_device_count()):
-        info = p.get_device_info_by_index(i)
-        device_data = {
-            'index': i,
-            'name': info['name'],
-            'channels': info['maxInputChannels'] if info['maxInputChannels'] > 0 else info['maxOutputChannels'], # Use maxInputChannels for mics, maxOutputChannels for speakers
-            'default_sample_rate': info['defaultSampleRate'],
-            'host_api': p.get_host_api_info_by_index(info['hostApi'])['name']
-        }
-
-        # Devices with input channels can be used for recording
-        if info['maxInputChannels'] > 0:
-            microphones.append(device_data)
-
-        # Devices with output channels can be used as speakers
-        if info['maxOutputChannels'] > 0:
-            speakers.append(device_data)
-
-    p.terminate()
-
-    return {
-        'microphones': microphones,
-        'speakers': speakers,
-        'all_devices': microphones + speakers # For backward compatibility or general listing
-    }
-
-
-def get_default_devices() -> Dict[str, Optional[int]]:
-    """
-    Get system default audio devices.
-
-    Returns:
-        Dict: Dictionary with 'mic' and 'speaker' default device indices
-    """
-    p = pyaudio.PyAudio()
-    mic_index = None
-    speaker_index = None
-
-    try:
-        default_input = p.get_default_input_device_info()
-        mic_index = default_input['index']
-    except Exception as e:
-        logger.warning(f"Could not get default input device: {e}")
-
-    try:
-        default_output = p.get_default_output_device_info()
-        speaker_index = default_output['index']
-    except Exception as e:
-        logger.warning(f"Could not get default output device: {e}")
-    finally:
-        p.terminate()
-
-    return {
-        'mic': mic_index,
-        'speaker': speaker_index
-    }
-
-
-def test_device(device_index: int, duration: float = 0.5) -> bool:
-    """
-    Test if a device is working by attempting a short recording/playback.
-
-    Args:
-        device_index: Index of the device to test
-        duration: Test duration in seconds (default: 0.5)
-
-    Returns:
-        bool: True if device is working, False otherwise
-    """
-    p = pyaudio.PyAudio()
-    try:
-        # Try to open a stream with the device
-        stream = p.open(format=pyaudio.paInt16,
-                        channels=1,  # Use 1 channel for testing, common denominator
-                        rate=44100,  # Common sample rate
-                        input_device_index=device_index,
-                        input=True,
-                        frames_per_buffer=1024)
-
-        # Try to read some data
-        for _ in range(0, int(44100 / 1024 * duration)):
-            data = stream.read(1024, exception_on_overflow=False)
-            if not data:
-                return False  # No data read
-
-        stream.stop_stream()
-        stream.close()
-        return True
-    except Exception as e:
-        logger.debug(f"Device {device_index} test failed: {e}")
-        return False
-    finally:
-        p.terminate()
-
-
-def auto_detect_devices() -> Dict[str, Optional[Dict]]:
-    """
-    Automatically detect working audio devices with smart prioritization.
-    Handles headphones, built-in devices, and external audio interfaces.
-
-    Returns:
-        Dict: Dictionary with 'mic' and 'speaker' device information
-    """
-    devices = list_audio_devices()
-    working_mic = None
-    working_speaker = None
-    tested_devices = []
-
-    # 1. First, try default devices
-    defaults = get_default_devices()
-    if defaults['mic'] is not None:
-        logger.info(f"Testing default mic: {devices['microphones'][defaults['mic']]['name']}")
-        if test_device(defaults['mic']):
-            working_mic = devices['microphones'][defaults['mic']]
-            tested_devices.append(working_mic['name'])
-
-    if working_mic is None: # If default mic didn't work or wasn't available
-        # 2. Test microphones by priority
-        prioritized_mics = []
-        for dev in devices['microphones']:
-            priority = get_device_priority(dev)
-            prioritized_mics.append((priority, dev))
-
-        # Sort by priority (highest first)
-        prioritized_mics.sort(key=lambda x: x[0], reverse=True)
-
-        for priority, dev in prioritized_mics:
-            if dev['name'] not in tested_devices: # Don't retest already tested devices
-                logger.debug(f"Testing mic: {dev['name']} (Priority: {priority})")
-                if test_device(dev['index']):
-                    working_mic = dev
-                    tested_devices.append(dev['name'])
-                    device_type = "headphone" if classify_device(dev['name'])['is_headphone'] else "external" if classify_device(dev['name'])['is_external'] else "built-in audio"
-                    logger.info(f"Auto-detected working microphone: {dev['name']} ({device_type})")
-                    break # Found a working mic, stop searching
-
-    # Speaker detection (simpler, usually less critical than mic selection)
-    if defaults['speaker'] is not None:
-        logger.info(f"Testing default speaker: {devices['speakers'][defaults['speaker']]['name']}")
-        # For speakers, we don't 'test' in the same way as mics (no recording)
-        # We assume if it's the default and exists, it's generally working.
-        working_speaker = devices['speakers'][defaults['speaker']]
-        tested_devices.append(working_speaker['name'])
-
-    if working_speaker is None: # If default speaker didn't work or wasn't available
-        # Try virtual devices first for best for system audio capture
-        virtual_speakers = [dev for dev in devices['speakers'] if classify_device(dev['name'])['is_virtual']]
-        for dev in virtual_speakers:
-            if dev['name'] not in tested_devices:
-                # For speakers, we don't have a reliable 'test_device' like for mics.
-                # We prioritize based on name and assume existence implies functionality for now.
-                working_speaker = dev
-                tested_devices.append(dev['name'])
-                logger.info(f"Auto-detected working virtual speaker: {dev['name']}")
-                break
-
-    if working_speaker is None:
-        # Fallback to any other available speaker if virtual didn't work
-        other_speakers = [dev for dev in devices['speakers'] if dev['name'] not in tested_devices]
-        if other_speakers:
-            working_speaker = other_speakers[0] # Just pick the first available
-            tested_devices.append(working_speaker['name'])
-            logger.info(f"Auto-detected working speaker (fallback): {working_speaker['name']}")
-
-    if working_mic is None and len(devices['microphones']) > 0:
-        # Fallback: if no working mic found after all attempts, just pick the first available mic.
-        # This might not be working, but ensures a mic is selected if nothing else is.
-        working_mic = devices['microphones'][0]
-        logger.warning(f"Could not confirm a working microphone, using first available: {working_mic['name']}")
-
-    if working_speaker is None and len(devices['speakers']) > 0:
-        # Fallback for speaker
-        working_speaker = devices['speakers'][0]
-        logger.warning(f"Could not confirm a working speaker, using first available: {working_speaker['name']}")
-
-    if not tested_devices and not working_mic and not working_speaker:
-        logger.debug("No working devices found.")
-
-    return {
-        'mic': working_mic,
-        'speaker': working_speaker
-    }
-
-
 def print_all_devices():
     """
     Print all available devices in a formatted way with classifications.
@@ -486,7 +402,7 @@ def print_all_devices():
     print("=" * 80 + "\n")
 
     working = auto_detect_devices()
-    if working['mic']:
+    if working.get('mic'):
         mic_classification = classify_device(working['mic']['name'])
         device_type = ""
         if mic_classification['is_headphone']:
@@ -501,11 +417,11 @@ def print_all_devices():
             device_type = "Microphone"
 
         print(f"  Working Microphone: {working['mic']['name']} ({device_type})")
-        print(f"    Index: {working['mic']['index']}, Channels: {working['mic']['channels']}, Sample Rate: {int(working['mic']['default_sample_rate'])} Hz\n")
+        print(f"    Index: {working['mic']['index']}, Channels: {working['mic']['channels']}\n")
     else:
         print("  No working microphone detected.")
 
-    if working['speaker']:
+    if working.get('speaker'):
         speaker_classification = classify_device(working['speaker']['name'])
         device_type = ""
         if speaker_classification['is_headphone']:
@@ -520,10 +436,14 @@ def print_all_devices():
             device_type = "Speaker"
 
         print(f"  Working Speaker: {working['speaker']['name']} ({device_type})")
-        print(f"    Index: {working['speaker']['index']}, Channels: {working['speaker']['channels']}, Sample Rate: {int(working['speaker']['default_sample_rate'])} Hz\n")
+        print(f"    Index: {working['speaker']['index']}, Channels: {working['speaker']['channels']}\n")
     else:
         print("  No working speaker detected.")
     print("=" * 80 + "\n")
+
+
+# Alias for backward compatibility
+print_devices = print_all_devices
 
 
 if __name__ == '__main__':
