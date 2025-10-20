@@ -1,8 +1,10 @@
-name: Publish to PyPI
+name: Publish to Test PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - main
+      - develop
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -64,10 +66,9 @@ jobs:
         name: dist
         path: dist/
 
-  publish:
+  publish-test:
     needs: build
     runs-on: ubuntu-latest
-    # environment: release  # Optional: uncomment if you set up GitHub Environment
     permissions:
       id-token: write  # Required for trusted publishing
     
@@ -80,9 +81,8 @@ jobs:
         name: dist
         path: dist/
     
-    - name: Publish to PyPI
+    - name: Publish to Test PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        # For trusted publishing (recommended), remove password and configure on PyPI
-        # See: https://docs.pypi.org/trusted-publishers/
+        password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        repository-url: https://test.pypi.org/legacy/
