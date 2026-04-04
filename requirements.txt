@@ -2,3 +2,4 @@ pyaudio>=0.2.11
 opencv-python>=4.8.0
 numpy>=1.19.0
 mss>=6.1.0
+pyaudiowpatch>=0.2.12; sys_platform == "win32"

@@ -15,6 +15,14 @@ from .device_manager import auto_detect_devices
 
 logger = logging.getLogger(__name__)
 
+# Try to import pyaudiowpatch for WASAPI loopback (Windows speaker capture)
+_has_wpatch = False
+try:
+    import pyaudiowpatch as pyaudio_wp
+    _has_wpatch = True
+except ImportError:
+    pyaudio_wp = None
+
 class RecordMyMeeting:
     """
     Main class for recording audio and screen.
@@ -82,38 +90,68 @@ class RecordMyMeeting:
             else:
                 raise RuntimeError("No microphone detected. Use recordmymeeting --list-devices to see available devices.")
 
-        # Only detect speaker if recording speaker and not provided
+        # Speaker detection: prefer WASAPI loopback (pyaudiowpatch) on Windows
+        self._use_loopback = False
+        self._loopback_device = None
+        self._loopback_sr = self.audio_rate
+        self._loopback_ch = 2
+
         if self.record_speaker and self.speaker_index is None:
             logger.info("Auto-detecting speaker device...")
-            detected = auto_detect_devices()
-            if 'speaker' in detected and detected['speaker']:
-                self.speaker_index = detected['speaker']['index']
-                logger.info(f"Using speaker: {detected['speaker']['name']}")
-                
-                # Test if we can actually record from this device
+
+            # Strategy 1: WASAPI loopback via pyaudiowpatch (best on Windows)
+            if _has_wpatch and sys.platform == 'win32':
                 try:
-                    p = pyaudio.PyAudio()
-                    test_stream = p.open(
-                        format=self.format,
-                        channels=1,
-                        rate=self.audio_rate,
-                        input=True,
-                        input_device_index=self.speaker_index,
-                        frames_per_buffer=self.frames_per_buffer
-                    )
-                    # Try to read some data to verify it works
-                    test_stream.read(self.frames_per_buffer, exception_on_overflow=False)
-                    test_stream.stop_stream()
-                    test_stream.close()
-                    p.terminate()
-                    logger.info("Speaker recording test successful")
+                    p_wp = pyaudio_wp.PyAudio()
+                    wasapi_info = p_wp.get_host_api_info_by_type(pyaudio_wp.paWASAPI)
+                    default_output = p_wp.get_device_info_by_index(wasapi_info['defaultOutputDevice'])
+
+                    for lb in p_wp.get_loopback_device_info_generator():
+                        if default_output['name'] in lb['name']:
+                            self._loopback_device = lb
+                            break
+
+                    if self._loopback_device:
+                        self._use_loopback = True
+                        self._loopback_sr = int(self._loopback_device['defaultSampleRate'])
+                        self._loopback_ch = self._loopback_device['maxInputChannels']
+                        logger.info(f"Using WASAPI loopback: {self._loopback_device['name']} "
+                                    f"(ch={self._loopback_ch}, sr={self._loopback_sr})")
+                    p_wp.terminate()
                 except Exception as e:
-                    logger.warning(f"Speaker recording test failed: {e}")
+                    logger.debug(f"WASAPI loopback detection failed: {e}")
+
+            # Strategy 2: Fallback to standard PyAudio device detection
+            if not self._use_loopback:
+                detected = auto_detect_devices()
+                if 'speaker' in detected and detected['speaker']:
+                    self.speaker_index = detected['speaker']['index']
+                    logger.info(f"Using speaker: {detected['speaker']['name']}")
+                    try:
+                        p = pyaudio.PyAudio()
+                        device_info = p.get_device_info_by_index(self.speaker_index)
+                        max_ch = int(device_info.get('maxInputChannels', 0))
+                        if max_ch == 0:
+                            raise Exception("Device has no input channels")
+                        test_ch = min(self.channels, max_ch)
+                        test_stream = p.open(
+                            format=self.format, channels=test_ch,
+                            rate=self.audio_rate, input=True,
+                            input_device_index=self.speaker_index,
+                            frames_per_buffer=self.frames_per_buffer
+                        )
+                        test_stream.read(self.frames_per_buffer, exception_on_overflow=False)
+                        test_stream.stop_stream()
+                        test_stream.close()
+                        p.terminate()
+                        logger.info("Speaker recording test successful")
+                    except Exception as e:
+                        logger.warning(f"Speaker recording test failed: {e}")
+                        logger.warning("No working speaker detected, disabling speaker recording.")
+                        self.record_speaker = False
+                else:
                     logger.warning("No working speaker detected, disabling speaker recording.")
                     self.record_speaker = False
-            else:
-                logger.warning("No working speaker detected, disabling speaker recording.")
-                self.record_speaker = False
 
         # Recording state
         self.recording = False
@@ -271,32 +309,69 @@ class RecordMyMeeting:
         except Exception as e:
             logger.error(f"Error during screen recording: {e}")
 
+    def _start_loopback_capture(self):
+        """Start WASAPI loopback capture for speaker audio in a callback stream."""
+        if not (self._use_loopback and _has_wpatch and self._loopback_device):
+            return
+
+        try:
+            self._loopback_pa = pyaudio_wp.PyAudio()
+            lb = self._loopback_device
+
+            def _loopback_callback(in_data, frame_count, time_info, status):
+                if in_data and self.recording:
+                    self.speaker_frames.append(in_data)
+                return (None, pyaudio_wp.paContinue)
+
+            self._loopback_stream = self._loopback_pa.open(
+                format=pyaudio_wp.paInt16,
+                channels=self._loopback_ch,
+                rate=self._loopback_sr,
+                input=True,
+                input_device_index=lb['index'],
+                frames_per_buffer=self.frames_per_buffer,
+                stream_callback=_loopback_callback,
+            )
+            logger.info(f"WASAPI loopback stream opened (callback mode)")
+        except Exception as e:
+            logger.error(f"Failed to open loopback stream: {e}")
+            self._use_loopback = False
+
+    def _stop_loopback_capture(self):
+        """Stop WASAPI loopback capture."""
+        if hasattr(self, '_loopback_stream') and self._loopback_stream:
+            try:
+                self._loopback_stream.stop_stream()
+                self._loopback_stream.close()
+            except:
+                pass
+        if hasattr(self, '_loopback_pa') and self._loopback_pa:
+            try:
+                self._loopback_pa.terminate()
+            except:
+                pass
+
     def _record_audio(self):
         """Record audio from mic and/or speaker in a separate thread with dynamic device switching."""
         p = pyaudio.PyAudio()
         mic_stream = None
         speaker_stream = None
-        detected_devices = auto_detect_devices()
-        
-        # Track current device indices for switching detection
+
         current_mic_index = self.mic_index
-        current_speaker_index = self.speaker_index
         last_device_check = time.time()
-        device_check_interval = 2.0  # Check for device changes every 2 seconds
+        device_check_interval = 2.0
 
         try:
-            # Open microphone stream if recording mic
+            # Open microphone stream
             if self.record_mic:
                 try:
                     device_info = p.get_device_info_by_index(self.mic_index)
                     max_channels = int(device_info.get('maxInputChannels', self.channels))
                     actual_channels = min(self.channels, max_channels)
-                    
+
                     mic_stream = p.open(
-                        format=self.format,
-                        channels=actual_channels,
-                        rate=self.audio_rate,
-                        input=True,
+                        format=self.format, channels=actual_channels,
+                        rate=self.audio_rate, input=True,
                         input_device_index=self.mic_index,
                         frames_per_buffer=self.frames_per_buffer
                     )
@@ -305,164 +380,89 @@ class RecordMyMeeting:
                     logger.error(f"Failed to open microphone stream: {e}")
                     self.record_mic = False
 
-            # Open speaker stream if recording speaker
-            if self.record_speaker:
+            # Speaker: use WASAPI loopback if available, otherwise fallback
+            if self.record_speaker and self._use_loopback:
+                self._start_loopback_capture()
+            elif self.record_speaker and self.speaker_index is not None:
                 try:
-                    if self.speaker_index is None and 'speaker' in detected_devices and detected_devices['speaker']:
-                        self.speaker_index = detected_devices['speaker']['index']
-                        logger.info(f"Using detected speaker device: {detected_devices['speaker']['name']}")
-                    
-                    if self.speaker_index is not None:
-                        device_info = p.get_device_info_by_index(self.speaker_index)
-                        max_channels = int(device_info.get('maxInputChannels', 0))
-                        
-                        # Validate that device supports input recording
-                        if max_channels == 0:
-                            raise Exception(f"Invalid audio channels: Device {self.speaker_index} does not support input recording (maxInputChannels=0). On Windows, try 'Stereo Mix' device.")
-                        
-                        actual_channels = min(self.channels, max_channels)
-
-                        # Open speaker stream (removed as_loopback parameter - not supported by PyAudio)
-                        speaker_stream = p.open(
-                            format=self.format,
-                            channels=actual_channels,
-                            rate=self.audio_rate,
-                            input=True,
-                            input_device_index=self.speaker_index,
-                            frames_per_buffer=self.frames_per_buffer
-                        )
-                        
-                        logger.info(f"Speaker stream opened (device {self.speaker_index}, channels: {actual_channels})")
-                    else:
-                        raise Exception("No valid speaker device found")
-                        
+                    device_info = p.get_device_info_by_index(self.speaker_index)
+                    max_channels = int(device_info.get('maxInputChannels', 0))
+                    if max_channels == 0:
+                        raise Exception("Device has no input channels")
+                    actual_channels = min(self.channels, max_channels)
+                    speaker_stream = p.open(
+                        format=self.format, channels=actual_channels,
+                        rate=self.audio_rate, input=True,
+                        input_device_index=self.speaker_index,
+                        frames_per_buffer=self.frames_per_buffer
+                    )
+                    logger.info(f"Speaker stream opened (device {self.speaker_index})")
                 except Exception as e:
                     logger.error(f"Failed to open speaker stream: {e}")
                     self.record_speaker = False
 
-            # Enhanced recording loop with device monitoring
+            # Recording loop — mic uses blocking read, speaker loopback uses callback
             while self.recording:
-                # Check for device changes periodically
+                # Check for mic device changes periodically
                 current_time = time.time()
                 if current_time - last_device_check >= device_check_interval:
                     last_device_check = current_time
                     try:
                         new_devices = auto_detect_devices()
-                        
-                        # Check if microphone changed
                         if self.record_mic and mic_stream and new_devices.get('mic'):
                             new_mic_index = new_devices['mic'].get('index')
                             if new_mic_index is not None and new_mic_index != current_mic_index:
-                                logger.info(f"Microphone device changed from {current_mic_index} to {new_mic_index}. Switching...")
+                                logger.info(f"Mic changed: {current_mic_index} -> {new_mic_index}")
                                 try:
-                                    # Close old stream
                                     mic_stream.stop_stream()
                                     mic_stream.close()
-                                    
-                                    # Open new stream
                                     device_info = p.get_device_info_by_index(new_mic_index)
-                                    max_channels = int(device_info.get('maxInputChannels', self.channels))
-                                    actual_channels = min(self.channels, max_channels)
-                                    
+                                    max_ch = int(device_info.get('maxInputChannels', self.channels))
                                     mic_stream = p.open(
-                                        format=self.format,
-                                        channels=actual_channels,
-                                        rate=self.audio_rate,
-                                        input=True,
+                                        format=self.format, channels=min(self.channels, max_ch),
+                                        rate=self.audio_rate, input=True,
                                         input_device_index=new_mic_index,
                                         frames_per_buffer=self.frames_per_buffer
                                     )
                                     current_mic_index = new_mic_index
                                     self.mic_index = new_mic_index
-                                    logger.info(f"Successfully switched to new microphone device {new_mic_index}")
+                                    logger.info(f"Switched to mic device {new_mic_index}")
                                 except Exception as e:
-                                    logger.error(f"Failed to switch microphone device: {e}")
-                        
-                        # Check if speaker changed
-                        if self.record_speaker and speaker_stream and new_devices.get('speaker'):
-                            new_speaker_index = new_devices['speaker'].get('index')
-                            if new_speaker_index is not None and new_speaker_index != current_speaker_index:
-                                logger.info(f"Speaker device changed from {current_speaker_index} to {new_speaker_index}. Switching...")
-                                try:
-                                    # Close old stream
-                                    speaker_stream.stop_stream()
-                                    speaker_stream.close()
-                                    
-                                    # Open new stream
-                                    device_info = p.get_device_info_by_index(new_speaker_index)
-                                    max_channels = int(device_info.get('maxInputChannels', self.channels))
-                                    actual_channels = min(self.channels, max_channels)
-                                    
-                                    speaker_stream = p.open(
-                                        format=self.format,
-                                        channels=actual_channels,
-                                        rate=self.audio_rate,
-                                        input=True,
-                                        input_device_index=new_speaker_index,
-                                        frames_per_buffer=self.frames_per_buffer
-                                    )
-                                    current_speaker_index = new_speaker_index
-                                    self.speaker_index = new_speaker_index
-                                    logger.info(f"Successfully switched to new speaker device {new_speaker_index}")
-                                except Exception as e:
-                                    logger.error(f"Failed to switch speaker device: {e}")
-                        
+                                    logger.error(f"Failed to switch mic: {e}")
                     except Exception as e:
-                        logger.debug(f"Error checking for device changes: {e}")
-                
-                # Record from microphone with error recovery
+                        logger.debug(f"Device check error: {e}")
+
+                # Read mic (blocking)
                 if self.record_mic and mic_stream:
                     try:
                         mic_data = mic_stream.read(self.frames_per_buffer, exception_on_overflow=False)
                         self.audio_frames.append(mic_data)
                     except Exception as e:
                         logger.warning(f"Mic read error: {e}")
-                        # Try to recover by reopening stream
                         try:
                             mic_stream.stop_stream()
                             mic_stream.close()
                             device_info = p.get_device_info_by_index(current_mic_index)
-                            max_channels = int(device_info.get('maxInputChannels', self.channels))
-                            actual_channels = min(self.channels, max_channels)
+                            max_ch = int(device_info.get('maxInputChannels', self.channels))
                             mic_stream = p.open(
-                                format=self.format,
-                                channels=actual_channels,
-                                rate=self.audio_rate,
-                                input=True,
+                                format=self.format, channels=min(self.channels, max_ch),
+                                rate=self.audio_rate, input=True,
                                 input_device_index=current_mic_index,
                                 frames_per_buffer=self.frames_per_buffer
                             )
-                            logger.info("Microphone stream recovered")
-                        except Exception as recovery_error:
-                            logger.error(f"Failed to recover microphone stream: {recovery_error}")
+                            logger.info("Mic stream recovered")
+                        except Exception:
+                            logger.error("Failed to recover mic stream")
                             break
 
-                # Record from speaker with error recovery
-                if self.record_speaker and speaker_stream:
+                # Read speaker (only for non-loopback fallback path)
+                if self.record_speaker and speaker_stream and not self._use_loopback:
                     try:
                         speaker_data = speaker_stream.read(self.frames_per_buffer, exception_on_overflow=False)
                         self.speaker_frames.append(speaker_data)
                     except Exception as e:
                         logger.warning(f"Speaker read error: {e}")
-                        # Try to recover by reopening stream
-                        try:
-                            speaker_stream.stop_stream()
-                            speaker_stream.close()
-                            device_info = p.get_device_info_by_index(current_speaker_index)
-                            max_channels = int(device_info.get('maxInputChannels', self.channels))
-                            actual_channels = min(self.channels, max_channels)
-                            speaker_stream = p.open(
-                                format=self.format,
-                                channels=actual_channels,
-                                rate=self.audio_rate,
-                                input=True,
-                                input_device_index=current_speaker_index,
-                                frames_per_buffer=self.frames_per_buffer
-                            )
-                            logger.info("Speaker stream recovered")
-                        except Exception as recovery_error:
-                            logger.error(f"Failed to recover speaker stream: {recovery_error}")
-                            break
+                        break
 
                 time.sleep(0.001)
 
@@ -471,7 +471,6 @@ class RecordMyMeeting:
         except Exception as e:
             logger.error(f"Error during audio recording: {e}")
         finally:
-            # Clean up streams
             if mic_stream:
                 try:
                     mic_stream.stop_stream()
@@ -484,6 +483,7 @@ class RecordMyMeeting:
                     speaker_stream.close()
                 except:
                     pass
+            self._stop_loopback_capture()
             p.terminate()
 
     def _save_audio(self):
@@ -509,14 +509,17 @@ class RecordMyMeeting:
             else:
                 logger.warning("Microphone was set to record, but no audio frames were captured.")
 
-        # Save speaker audio - CRITICAL FIX: Split condition check!
+        # Save speaker audio
         if self.record_speaker and self.speaker_file:
             if self.speaker_frames:
                 try:
+                    # Use loopback params if WASAPI loopback was used
+                    sp_ch = self._loopback_ch if self._use_loopback else self.channels
+                    sp_sr = self._loopback_sr if self._use_loopback else self.audio_rate
                     wf = wave.open(self.speaker_file, 'wb')
-                    wf.setnchannels(self.channels)
+                    wf.setnchannels(sp_ch)
                     wf.setsampwidth(p.get_sample_size(self.format))
-                    wf.setframerate(self.audio_rate)
+                    wf.setframerate(sp_sr)
                     wf.writeframes(b''.join(self.speaker_frames))
                     wf.close()
                     logger.info(f"Speaker audio saved: {self.speaker_file}")
@@ -529,43 +532,49 @@ class RecordMyMeeting:
 
 
     def _merge_audio(self):
-        """
-        Merge microphone and speaker audio into a single file.
-        BUG FIX #2: Use wave.open() instead of audioread to avoid AttributeError.
+        """Merge microphone and speaker audio into a single file.
+
+        Handles different sample rates and channel counts by resampling
+        the speaker audio to match the mic format before mixing.
         """
         if not (self.mic_file and self.speaker_file and self.merged_file):
-            logger.warning("Cannot merge audio: one or more required file paths are missing.")
+            logger.warning("Cannot merge audio: missing file paths.")
             return
 
         try:
-            # Read both audio files using wave module directly (FIXED)
             with wave.open(self.mic_file, 'rb') as wf_mic:
                 mic_params = wf_mic.getparams()
-                mic_nframes = wf_mic.getnframes()  # Direct access (no AttributeError)
-                mic_audio_data = wf_mic.readframes(mic_nframes)
+                mic_audio_data = wf_mic.readframes(wf_mic.getnframes())
 
             with wave.open(self.speaker_file, 'rb') as wf_speaker:
                 speaker_params = wf_speaker.getparams()
-                speaker_nframes = wf_speaker.getnframes()
-                speaker_audio_data = wf_speaker.readframes(speaker_nframes)
+                speaker_audio_data = wf_speaker.readframes(wf_speaker.getnframes())
 
-            # Use the minimum length to avoid errors
-            min_frames = min(mic_nframes, speaker_nframes)
-            
-            # Convert to numpy arrays for mixing
             mic_np = np.frombuffer(mic_audio_data, dtype=np.int16)
             speaker_np = np.frombuffer(speaker_audio_data, dtype=np.int16)
-            
+
+            # Convert speaker to mono if mic is mono but speaker is stereo
+            if speaker_params.nchannels > mic_params.nchannels:
+                # Reshape to (n_frames, n_channels) and average
+                speaker_np = speaker_np.reshape(-1, speaker_params.nchannels)
+                speaker_np = speaker_np.mean(axis=1).astype(np.int16)
+
+            # Resample speaker to mic sample rate if different
+            if speaker_params.framerate != mic_params.framerate:
+                ratio = mic_params.framerate / speaker_params.framerate
+                new_len = int(len(speaker_np) * ratio)
+                indices = np.linspace(0, len(speaker_np) - 1, new_len).astype(int)
+                speaker_np = speaker_np[indices]
+
             # Truncate to same length
             min_samples = min(len(mic_np), len(speaker_np))
             mic_np = mic_np[:min_samples]
             speaker_np = speaker_np[:min_samples]
 
-            # Mix (simple average to avoid clipping)
+            # Mix (average to prevent clipping)
             merged_np = (mic_np.astype(np.int32) + speaker_np.astype(np.int32)) // 2
             merged_audio_data = merged_np.astype(np.int16).tobytes()
 
-            # Write merged audio to file
             with wave.open(self.merged_file, 'wb') as wf_merged:
                 wf_merged.setnchannels(mic_params.nchannels)
                 wf_merged.setsampwidth(mic_params.sampwidth)
